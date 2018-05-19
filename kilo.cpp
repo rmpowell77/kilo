@@ -397,7 +397,6 @@ void editorConfig::editorUpdateSyntax(erow &row) {
 
     if (m_syntax == NULL) return; /* No syntax, everything is HL_NORMAL. */
 
-#if 0
     int i, prev_sep, in_string, in_comment;
     char const *p;
     char const **keywords = m_syntax->keywords;
@@ -503,7 +502,7 @@ void editorConfig::editorUpdateSyntax(erow &row) {
                     is_separator(*(p+klen)))
                 {
                     /* Keyword */
-                    memset(row.hl+i,kw2 ? HL_KEYWORD2 : HL_KEYWORD1,klen);
+                    std::fill(row.hl.begin()+i,row.hl.begin()+i+klen,kw2 ? HL_KEYWORD2 : HL_KEYWORD1);
                     p += klen;
                     i += klen;
                     break;
@@ -527,7 +526,6 @@ void editorConfig::editorUpdateSyntax(erow &row) {
     if (row.hl_oc != oc && row.idx+1 < m_rows.size())
         editorUpdateSyntax(m_rows[row.idx+1]);
     row.hl_oc = oc;
-#endif
 }
 
 /* Maps syntax highlight token types to terminal colors. */
