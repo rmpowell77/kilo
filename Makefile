@@ -1,7 +1,7 @@
 all: kilo
 
-kilo: kilo.c
-	$(CC) -o kilo kilo.c -Wall -W -pedantic -std=c99
+kilo: kilo.cpp
+	$(CXX) -std=c++1z -o $@ $< -Wall -W -pedantic 
 
 clean:
 	rm kilo
