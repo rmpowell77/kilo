@@ -603,15 +603,10 @@ void editorConfig::editorInsertRow(size_t at, std::string const& s) {
     m_dirty++;
 }
 
-/* Free row's heap allocated stuff. */
-void editorFreeRow(erow *) {
-}
-
 /* Remove the row at the specified position, shifting the remainign on the
  * top. */
 void editorConfig::editorDelRow(size_t at) {
     if (at >= m_rows.size()) return;
-    editorFreeRow(m_rows.data()+at);
     m_rows.erase(m_rows.begin()+at);
     for (auto j = at; j < m_rows.size(); j++) m_rows[j].idx++;
     m_dirty++;
