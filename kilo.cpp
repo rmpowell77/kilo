@@ -51,8 +51,6 @@
 #include <stdarg.h>
 #include <fcntl.h>
 
-#include <string>
-
 /* Syntax highlight types */
 #define HL_NORMAL 0
 #define HL_NONPRINT 1
@@ -77,20 +75,20 @@ struct editorSyntax {
 };
 
 /* This structure represents a single line of the file we are editing. */
-struct erow {
+typedef struct erow {
     int idx;            /* Row index in the file, zero-based. */
     int size;           /* Size of the row, excluding the null term. */
     int rsize;          /* Size of the rendered row. */
-    std::string chars;        /* Row content. */
+    char *chars;        /* Row content. */
     char *render;       /* Row content "rendered" for screen (for TABs). */
     unsigned char *hl;  /* Syntax highlight type for each character in render.*/
     int hl_oc;          /* Row had open comment at end in last syntax highlight
                            check. */
-};
+} erow;
 
-struct hlcolor {
+typedef struct hlcolor {
     int r,g,b;
-};
+} hlcolor;
 
 struct editorConfig {
     int cx,cy;  /* Cursor x and y position in characters */
@@ -571,13 +569,14 @@ void editorUpdateRow(erow *row) {
  * if required. */
 void editorInsertRow(int at, char const *s, size_t len) {
     if (at > E.numrows) return;
-    E.row = static_cast<erow *>(realloc(E.row,sizeof(erow)*(E.numrows+1)));
+    E.row = static_cast<erow*>(realloc(E.row,sizeof(erow)*(E.numrows+1)));
     if (at != E.numrows) {
         memmove(E.row+at+1,E.row+at,sizeof(E.row[0])*(E.numrows-at));
         for (int j = at+1; j <= E.numrows; j++) E.row[j].idx++;
     }
     E.row[at].size = len;
-    E.row[at].chars.assign(s, len);
+    E.row[at].chars = static_cast<char*>(malloc(len+1));
+    memcpy(E.row[at].chars,s,len+1);
     E.row[at].hl = NULL;
     E.row[at].hl_oc = 0;
     E.row[at].render = NULL;
@@ -591,6 +590,7 @@ void editorInsertRow(int at, char const *s, size_t len) {
 /* Free row's heap allocated stuff. */
 void editorFreeRow(erow *row) {
     free(row->render);
+    free(row->chars);
     free(row->hl);
 }
 
@@ -625,7 +625,7 @@ char *editorRowsToString(int *buflen) {
 
     p = buf = static_cast<char*>(malloc(totlen));
     for (j = 0; j < E.numrows; j++) {
-        memcpy(p,E.row[j].chars.data(),E.row[j].size);
+        memcpy(p,E.row[j].chars,E.row[j].size);
         p += E.row[j].size;
         *p = '\n';
         p++;
@@ -637,21 +637,41 @@ char *editorRowsToString(int *buflen) {
 /* Insert a character at the specified position in a row, moving the remaining
  * chars on the right if needed. */
 void editorRowInsertChar(erow *row, int at, int c) {
-    row->chars.insert(at, 1, c);
+    if (at > row->size) {
+        /* Pad the string with spaces if the insert location is outside the
+         * current length by more than a single character. */
+        int padlen = at-row->size;
+        /* In the next line +2 means: new char and null term. */
+        row->chars = static_cast<char*>(realloc(row->chars,row->size+padlen+2));
+        memset(row->chars+row->size,' ',padlen);
+        row->chars[row->size+padlen+1] = '\0';
+        row->size += padlen+1;
+    } else {
+        /* If we are in the middle of the string just make space for 1 new
+         * char plus the (already existing) null term. */
+        row->chars = static_cast<char*>(realloc(row->chars,row->size+2));
+        memmove(row->chars+at+1,row->chars+at,row->size-at+1);
+        row->size++;
+    }
+    row->chars[at] = c;
     editorUpdateRow(row);
     E.dirty++;
 }
 
 /* Append the string 's' at the end of a row */
 void editorRowAppendString(erow *row, char *s, size_t len) {
-    row->chars += std::string(s, len);
+    row->chars = static_cast<char*>(realloc(row->chars,row->size+len+1));
+    memcpy(row->chars+row->size,s,len);
+    row->size += len;
+    row->chars[row->size] = '\0';
     editorUpdateRow(row);
     E.dirty++;
 }
 
 /* Delete the character at offset 'at' from the specified row. */
 void editorRowDelChar(erow *row, int at) {
-    row->chars.erase(at, 1);
+    if (row->size <= at) return;
+    memmove(row->chars+at,row->chars+at+1,row->size-at);
     editorUpdateRow(row);
     row->size--;
     E.dirty++;
@@ -699,7 +719,7 @@ void editorInsertNewline(void) {
         editorInsertRow(filerow,"",0);
     } else {
         /* We are in the middle of a line. Split it between two rows. */
-        editorInsertRow(filerow+1,row->chars.data()+filecol,row->size-filecol);
+        editorInsertRow(filerow+1,row->chars+filecol,row->size-filecol);
         row = &E.row[filerow];
         row->chars[filecol] = '\0';
         row->size = filecol;
@@ -726,7 +746,7 @@ void editorDelChar() {
         /* Handle the case of column 0, we need to move the current line
          * on the right of the previous one. */
         filecol = E.row[filerow-1].size;
-        editorRowAppendString(&E.row[filerow-1],row->chars.data(),row->size);
+        editorRowAppendString(&E.row[filerow-1],row->chars,row->size);
         editorDelRow(filerow);
         row = NULL;
         if (E.cy == 0)
