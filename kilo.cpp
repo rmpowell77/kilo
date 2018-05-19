@@ -91,22 +91,29 @@ struct hlcolor {
 };
 
 struct editorConfig {
-    int cx,cy;  /* Cursor x and y position in characters */
-    int rowoff;     /* Offset of row displayed. */
-    int coloff;     /* Offset of column displayed. */
-    int screenrows; /* Number of rows that we can show */
-    int screencols; /* Number of cols that we can show */
-    int numrows;    /* Number of rows */
-    int rawmode;    /* Is terminal raw mode enabled? */
-    erow *row;      /* Rows */
-    int dirty;      /* File modified but not saved. */
-    char *filename; /* Currently open filename */
-    char statusmsg[80];
-    time_t statusmsg_time;
-    struct editorSyntax *syntax;    /* Current syntax highlight, or NULL. */
+    int cx{};
+    int cy{};  /* Cursor x and y position in characters */
+    int rowoff{};     /* Offset of row displayed. */
+    int coloff{};     /* Offset of column displayed. */
+    int screenrows{}; /* Number of rows that we can show */
+    int screencols{}; /* Number of cols that we can show */
+    int numrows{};    /* Number of rows */
+    int rawmode{};    /* Is terminal raw mode enabled? */
+    erow *row{};      /* Rows */
+    int dirty{};      /* File modified but not saved. */
+    char *filename{}; /* Currently open filename */
+    char statusmsg[80] = {};
+    time_t statusmsg_time{};
+    struct editorSyntax *syntax{};    /* Current syntax highlight, or NULL. */
+
+    editorConfig();
 
     void disableRawMode(int fd);
     int enableRawMode(int fd);
+    void editorSelectSyntaxHighlight(char *filename);
+    int editorOpen(char *filename);
+    void editorSetStatusMessage(const char *fmt, ...);
+
     void editorUpdateSyntax(erow &row);
 };
 
@@ -138,8 +145,6 @@ enum KEY_ACTION{
         PAGE_UP,
         PAGE_DOWN
 };
-
-void editorSetStatusMessage(editorConfig& E, const char *fmt, ...);
 
 /* =========================== Syntax highlights DB =========================
  *
@@ -522,7 +527,7 @@ int editorSyntaxToColor(int hl) {
 
 /* Select the syntax highlight scheme depending on the filename,
  * setting it in the global state E.syntax. */
-void editorSelectSyntaxHighlight(editorConfig& E, char *filename) {
+void editorConfig::editorSelectSyntaxHighlight(char *filename) {
     for (unsigned int j = 0; j < HLDB_ENTRIES; j++) {
         struct editorSyntax *s = HLDB+j;
         unsigned int i = 0;
@@ -531,7 +536,7 @@ void editorSelectSyntaxHighlight(editorConfig& E, char *filename) {
             int patlen = strlen(s->filematch[i]);
             if ((p = strstr(filename,s->filematch[i])) != NULL) {
                 if (s->filematch[i][0] != '.' || p[patlen] == '\0') {
-                    E.syntax = s;
+                    syntax = s;
                     return;
                 }
             }
@@ -776,12 +781,12 @@ void editorDelChar(editorConfig& E) {
 
 /* Load the specified program in the editor memory and returns 0 on success
  * or 1 on error. */
-int editorOpen(editorConfig& E, char *filename) {
+int editorConfig::editorOpen(char *filename_) {
     FILE *fp;
 
-    E.dirty = 0;
-    free(E.filename);
-    E.filename = strdup(filename);
+    dirty = 0;
+    free(filename);
+    filename = strdup(filename_);
 
     fp = fopen(filename,"r");
     if (!fp) {
@@ -798,11 +803,11 @@ int editorOpen(editorConfig& E, char *filename) {
     while((linelen = getline(&line,&linecap,fp)) != -1) {
         if (linelen && (line[linelen-1] == '\n' || line[linelen-1] == '\r'))
             line[--linelen] = '\0';
-        editorInsertRow(E, E.numrows,line,linelen);
+        editorInsertRow(*this, numrows,line,linelen);
     }
     free(line);
     fclose(fp);
-    E.dirty = 0;
+    dirty = 0;
     return 0;
 }
 
@@ -821,13 +826,13 @@ int editorSave(editorConfig& E) {
     close(fd);
     free(buf);
     E.dirty = 0;
-    editorSetStatusMessage(E, "%d bytes written on disk", len);
+    E.editorSetStatusMessage("%d bytes written on disk", len);
     return 0;
 
 writeerr:
     free(buf);
     if (fd != -1) close(fd);
-    editorSetStatusMessage(E, "Can't save! I/O error: %s",strerror(errno));
+    E.editorSetStatusMessage("Can't save! I/O error: %s",strerror(errno));
     return 1;
 }
 
@@ -979,12 +984,12 @@ void editorRefreshScreen(editorConfig& E) {
 
 /* Set an editor status message for the second line of the status, at the
  * end of the screen. */
-void editorSetStatusMessage(editorConfig& E, const char *fmt, ...) {
+void editorConfig::editorSetStatusMessage(const char *fmt, ...) {
     va_list ap;
     va_start(ap,fmt);
-    vsnprintf(E.statusmsg,sizeof(E.statusmsg),fmt,ap);
+    vsnprintf(statusmsg,sizeof(statusmsg),fmt,ap);
     va_end(ap);
-    E.statusmsg_time = time(NULL);
+    statusmsg_time = time(NULL);
 }
 
 /* =============================== Find mode ================================ */
@@ -1011,7 +1016,7 @@ void editorFind(editorConfig& E, int fd) {
     int saved_coloff = E.coloff, saved_rowoff = E.rowoff;
 
     while(1) {
-        editorSetStatusMessage(E, 
+        E.editorSetStatusMessage( 
             "Search: %s (Use ESC/Arrows/Enter)", query);
         editorRefreshScreen(E);
 
@@ -1025,7 +1030,7 @@ void editorFind(editorConfig& E, int fd) {
                 E.coloff = saved_coloff; E.rowoff = saved_rowoff;
             }
             FIND_RESTORE_HL;
-            editorSetStatusMessage(E, "");
+            E.editorSetStatusMessage("");
             return;
         } else if (c == ARROW_RIGHT || c == ARROW_DOWN) {
             find_next = 1;
@@ -1181,7 +1186,7 @@ void editorProcessKeypress(editorConfig& E, int fd) {
     case CTRL_Q:        /* Ctrl-q */
         /* Quit if the file was already saved. */
         if (E.dirty && quit_times) {
-            editorSetStatusMessage(E, "WARNING!!! File has unsaved changes. "
+            E.editorSetStatusMessage("WARNING!!! File has unsaved changes. "
                 "Press Ctrl-Q %d more times to quit.", quit_times);
             quit_times--;
             return;
@@ -1237,23 +1242,15 @@ int editorFileWasModified(editorConfig& E) {
     return E.dirty;
 }
 
-void initEditor(editorConfig& E) {
-    E.cx = 0;
-    E.cy = 0;
-    E.rowoff = 0;
-    E.coloff = 0;
-    E.numrows = 0;
-    E.row = NULL;
-    E.dirty = 0;
-    E.filename = NULL;
-    E.syntax = NULL;
+editorConfig::editorConfig()
+{
     if (getWindowSize(STDIN_FILENO,STDOUT_FILENO,
-                      &E.screenrows,&E.screencols) == -1)
+                      &screenrows,&screencols) == -1)
     {
         perror("Unable to query the screen for size (columns / rows)");
         exit(1);
     }
-    E.screenrows -= 2; /* Get room for status bar. */
+    screenrows -= 2; /* Get room for status bar. */
 }
 
 int main(int argc, char **argv) {
@@ -1262,11 +1259,10 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    initEditor(E_);
-    editorSelectSyntaxHighlight(E_, argv[1]);
-    editorOpen(E_, argv[1]);
+    E_.editorSelectSyntaxHighlight(argv[1]);
+    E_.editorOpen(argv[1]);
     E_.enableRawMode(STDIN_FILENO);
-    editorSetStatusMessage(E_,
+    E_.editorSetStatusMessage(
         "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
     while(1) {
         editorRefreshScreen(E_);
