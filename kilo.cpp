@@ -80,10 +80,9 @@ struct editorSyntax {
 /* This structure represents a single line of the file we are editing. */
 struct erow {
     size_t idx;            /* Row index in the file, zero-based. */
-    int rsize;          /* Size of the rendered row. */
     std::string chars;        /* Row content. */
     std::string render;       /* Row content "rendered" for screen (for TABs). */
-    unsigned char *hl;  /* Syntax highlight type for each character in render.*/
+    std::vector<unsigned char> hl;  /* Syntax highlight type for each character in render.*/
     int hl_oc;          /* Row had open comment at end in last syntax highlight
                            check. */
 };
@@ -385,17 +384,16 @@ int is_separator(int c) {
  * that starts at this row or at one before, and does not end at the end
  * of the row but spawns to the next row. */
 int editorRowHasOpenComment(erow const &row) {
-    if (row.hl && row.rsize && row.hl[row.rsize-1] == HL_MLCOMMENT &&
-        (row.rsize < 2 || (row.render[row.rsize-2] != '*' ||
-                            row.render[row.rsize-1] != '/'))) return 1;
+    if (row.render.size() && row.hl[row.render.size()-1] == HL_MLCOMMENT &&
+        (row.render.size() < 2 || (row.render[row.render.size()-2] != '*' ||
+                            row.render[row.render.size()-1] != '/'))) return 1;
     return 0;
 }
 
 /* Set every byte of row->hl (that corresponds to every character in the line)
  * to the right syntax highlight type (HL_* defines). */
 void editorConfig::editorUpdateSyntax(erow &row) {
-    row.hl = static_cast<unsigned char*>(realloc(row.hl,row.rsize));
-    memset(row.hl,HL_NORMAL,row.rsize);
+    row.hl = std::vector<unsigned char>(HL_NORMAL, row.render.size());
 
     if (m_syntax == NULL) return; /* No syntax, everything is HL_NORMAL. */
 
@@ -426,7 +424,7 @@ void editorConfig::editorUpdateSyntax(erow &row) {
         /* Handle // comments. */
         if (prev_sep && *p == scs[0] && *(p+1) == scs[1]) {
             /* From here to end is a comment */
-            memset(row.hl+i,HL_COMMENT,row.chars.size()-i);
+            std::fill(row.hl.begin() + i, row.hl.end(), HL_COMMENT);
             return;
         }
 
@@ -504,7 +502,7 @@ void editorConfig::editorUpdateSyntax(erow &row) {
                     is_separator(*(p+klen)))
                 {
                     /* Keyword */
-                    memset(row.hl+i,kw2 ? HL_KEYWORD2 : HL_KEYWORD1,klen);
+                    std::fill(row.hl.begin()+i, row.hl.begin()+i+klen,kw2 ? HL_KEYWORD2 : HL_KEYWORD1);
                     p += klen;
                     i += klen;
                     break;
@@ -575,7 +573,7 @@ void editorConfig::editorUpdateRow(erow &row) {
     for (auto& j : row.chars)
         if (j == TAB) tabs++;
 
-    row.render = std::string(row.chars.size() + tabs*8 + nonprint*9 + 1, ' ');
+    row.render = std::string(row.chars.size() + tabs*8 + nonprint*9, ' ');
     idx = 0;
     for (auto j : row.chars ) {
         if (j == TAB) {
@@ -585,8 +583,6 @@ void editorConfig::editorUpdateRow(erow &row) {
             row.render[idx++] = j;
         }
     }
-    row.rsize = idx;
-    row.render[idx] = '\0';
 
     /* Update the syntax highlighting attributes of the row. */
     editorUpdateSyntax(row);
@@ -601,24 +597,16 @@ void editorConfig::editorInsertRow(size_t at, std::string const& s) {
         for (auto j = at+1; j < m_rows.size(); j++) m_rows[j].idx++;
     }
     m_rows[at].chars = s;
-    m_rows[at].hl = NULL;
     m_rows[at].hl_oc = 0;
-    m_rows[at].rsize = 0;
     m_rows[at].idx = at;
     editorUpdateRow(*(m_rows.data()+at));
     m_dirty++;
-}
-
-/* Free row's heap allocated stuff. */
-void editorFreeRow(erow *row) {
-    free(row->hl);
 }
 
 /* Remove the row at the specified position, shifting the remainign on the
  * top. */
 void editorConfig::editorDelRow(size_t at) {
     if (at >= m_rows.size()) return;
-    editorFreeRow(m_rows.data()+at);
     m_rows.erase(m_rows.begin()+at);
     for (auto j = at; j < m_rows.size(); j++) m_rows[j].idx++;
     m_dirty++;
@@ -840,12 +828,12 @@ void editorConfig::editorRefreshScreen() {
 
         r = &m_rows[filerow];
 
-        int len = r->rsize - m_coloff;
+        int len = r->render.size() - m_coloff;
         int current_color = -1;
         if (len > 0) {
             if (len > m_screencols) len = m_screencols;
             char const *c = r->render.data()+m_coloff;
-            unsigned char *hl = r->hl+m_coloff;
+            unsigned char *hl = r->hl.data()+m_coloff;
             int j;
             for (j = 0; j < len; j++) {
                 if (hl[j] == HL_NONPRINT) {
@@ -871,7 +859,7 @@ void editorConfig::editorRefreshScreen() {
                         current_color = color;
                         ab += buf;
                     }
-                    ab += c[j]);
+                    ab += c[j];
                 }
             }
         }
@@ -946,12 +934,12 @@ void editorConfig::editorFind(int fd) {
     int last_match = -1; /* Last line where a match was found. -1 for none. */
     int find_next = 0; /* if 1 search next, if -1 search prev. */
     int saved_hl_line = -1;  /* No saved HL */
-    char *saved_hl = NULL;
+    std::vector<unsigned char> saved_hl;
 
 #define FIND_RESTORE_HL do { \
-    if (saved_hl) { \
-        memcpy(m_rows[saved_hl_line].hl,saved_hl, m_rows[saved_hl_line].rsize); \
-        saved_hl = NULL; \
+    if (!saved_hl.empty()) { \
+        m_rows[saved_hl_line].hl = saved_hl; \
+        saved_hl.clear(); \
     } \
 } while (0)
 
@@ -1013,11 +1001,10 @@ void editorConfig::editorFind(int fd) {
             if (match) {
                 erow *row = &m_rows[current];
                 last_match = current;
-                if (row->hl) {
+                if (!row->hl.empty()) {
                     saved_hl_line = current;
-                    saved_hl = static_cast<char*>(malloc(row->rsize));
-                    memcpy(saved_hl,row->hl,row->rsize);
-                    memset(row->hl+match_offset,HL_MATCH,qlen);
+                    saved_hl = row->hl;
+                    std::fill(row->hl.begin()+match_offset,row->hl.begin()+match_offset+qlen, HL_MATCH);
                 }
                 m_cy = 0;
                 m_cx = match_offset;
