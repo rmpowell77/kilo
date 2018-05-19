@@ -384,7 +384,7 @@ int is_separator(int c) {
  * that starts at this row or at one before, and does not end at the end
  * of the row but spawns to the next row. */
 int editorRowHasOpenComment(erow const &row) {
-    if (row.render.size() && row.hl[row.render.size()-1] == HL_MLCOMMENT &&
+    if (!row.hl.empty() && row.render.size() && row.hl[row.render.size()-1] == HL_MLCOMMENT &&
         (row.render.size() < 2 || (row.render[row.render.size()-2] != '*' ||
                             row.render[row.render.size()-1] != '/'))) return 1;
     return 0;
@@ -393,10 +393,11 @@ int editorRowHasOpenComment(erow const &row) {
 /* Set every byte of row->hl (that corresponds to every character in the line)
  * to the right syntax highlight type (HL_* defines). */
 void editorConfig::editorUpdateSyntax(erow &row) {
-    row.hl = std::vector<unsigned char>(HL_NORMAL, row.render.size());
+    row.hl = std::vector<unsigned char>(row.render.size(), HL_NORMAL);
 
     if (m_syntax == NULL) return; /* No syntax, everything is HL_NORMAL. */
 
+#if 0
     int i, prev_sep, in_string, in_comment;
     char const *p;
     char const **keywords = m_syntax->keywords;
@@ -424,7 +425,7 @@ void editorConfig::editorUpdateSyntax(erow &row) {
         /* Handle // comments. */
         if (prev_sep && *p == scs[0] && *(p+1) == scs[1]) {
             /* From here to end is a comment */
-            std::fill(row.hl.begin() + i, row.hl.end(), HL_COMMENT);
+            std::fill(row.hl.begin()+i, row.hl.end(), HL_COMMENT);
             return;
         }
 
@@ -502,7 +503,7 @@ void editorConfig::editorUpdateSyntax(erow &row) {
                     is_separator(*(p+klen)))
                 {
                     /* Keyword */
-                    std::fill(row.hl.begin()+i, row.hl.begin()+i+klen,kw2 ? HL_KEYWORD2 : HL_KEYWORD1);
+                    memset(row.hl+i,kw2 ? HL_KEYWORD2 : HL_KEYWORD1,klen);
                     p += klen;
                     i += klen;
                     break;
@@ -526,6 +527,7 @@ void editorConfig::editorUpdateSyntax(erow &row) {
     if (row.hl_oc != oc && row.idx+1 < m_rows.size())
         editorUpdateSyntax(m_rows[row.idx+1]);
     row.hl_oc = oc;
+#endif
 }
 
 /* Maps syntax highlight token types to terminal colors. */
@@ -603,10 +605,15 @@ void editorConfig::editorInsertRow(size_t at, std::string const& s) {
     m_dirty++;
 }
 
+/* Free row's heap allocated stuff. */
+void editorFreeRow(erow *) {
+}
+
 /* Remove the row at the specified position, shifting the remainign on the
  * top. */
 void editorConfig::editorDelRow(size_t at) {
     if (at >= m_rows.size()) return;
+    editorFreeRow(m_rows.data()+at);
     m_rows.erase(m_rows.begin()+at);
     for (auto j = at; j < m_rows.size(); j++) m_rows[j].idx++;
     m_dirty++;
@@ -936,12 +943,6 @@ void editorConfig::editorFind(int fd) {
     int saved_hl_line = -1;  /* No saved HL */
     std::vector<unsigned char> saved_hl;
 
-#define FIND_RESTORE_HL do { \
-    if (!saved_hl.empty()) { \
-        m_rows[saved_hl_line].hl = saved_hl; \
-        saved_hl.clear(); \
-    } \
-} while (0)
 
     /* Save the cursor position in order to restore it later. */
     int saved_cx = m_cx, saved_cy = m_cy;
@@ -961,7 +962,10 @@ void editorConfig::editorFind(int fd) {
                 m_cx = saved_cx; m_cy = saved_cy;
                 m_coloff = saved_coloff; m_rowoff = saved_rowoff;
             }
-            FIND_RESTORE_HL;
+            if (!saved_hl.empty()) {
+                m_rows[saved_hl_line].hl = saved_hl;
+                saved_hl.clear();
+            }
             editorSetStatusMessage("");
             return;
         } else if (c == ARROW_RIGHT || c == ARROW_DOWN) {
@@ -996,7 +1000,10 @@ void editorConfig::editorFind(int fd) {
             find_next = 0;
 
             /* Highlight */
-            FIND_RESTORE_HL;
+            if (!saved_hl.empty()) {
+                m_rows[saved_hl_line].hl = saved_hl;
+                saved_hl.clear();
+            }
 
             if (match) {
                 erow *row = &m_rows[current];
@@ -1004,7 +1011,7 @@ void editorConfig::editorFind(int fd) {
                 if (!row->hl.empty()) {
                     saved_hl_line = current;
                     saved_hl = row->hl;
-                    std::fill(row->hl.begin()+match_offset,row->hl.begin()+match_offset+qlen, HL_MATCH);
+                    std::fill(row->hl.begin()+match_offset, row->hl.begin()+match_offset+qlen,HL_MATCH);
                 }
                 m_cy = 0;
                 m_cx = match_offset;
