@@ -37,6 +37,8 @@
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
+#include "termconfig.h"
+
 #include <termios.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -81,8 +83,8 @@ struct editorSyntax {
 struct erow {
     size_t idx;            /* Row index in the file, zero-based. */
     std::string chars;        /* Row content. */
-    std::string render;       /* Row content "rendered" for screen (for TABs). */
-    std::vector<unsigned char> hl;  /* Syntax highlight type for each character in render.*/
+    std::string render;  /* Syntax highlight type for each character in render.*/
+    std::vector<int> hl;  /* Syntax highlight type for each character in render.*/
     int hl_oc;          /* Row had open comment at end in last syntax highlight
                            check. */
 };
@@ -106,11 +108,11 @@ struct editorConfig {
     void editorSelectSyntaxHighlight(char *filename);
     int editorOpen(std::string const& filename);
     int editorSave();
-    void editorFind(int fd);
+    void editorFind();
     void editorSetStatusMessage(const char *fmt, ...);
 
     void editorRefreshScreen();
-    void editorProcessKeypress(int fd);
+    void editorProcessKeypress();
 
     void editorUpdateSyntax(erow &row);
     void editorUpdateRow(erow &row);
@@ -126,35 +128,6 @@ struct editorConfig {
 
     std::string editorRowsToString() const;
 
-};
-
-static struct editorConfig E_;
-
-enum KEY_ACTION{
-        KEY_NULL = 0,       /* NULL */
-        CTRL_C = 3,         /* Ctrl-c */
-        CTRL_D = 4,         /* Ctrl-d */
-        CTRL_F = 6,         /* Ctrl-f */
-        CTRL_H = 8,         /* Ctrl-h */
-        TAB = 9,            /* Tab */
-        CTRL_L = 12,        /* Ctrl+l */
-        ENTER = 13,         /* Enter */
-        CTRL_Q = 17,        /* Ctrl-q */
-        CTRL_S = 19,        /* Ctrl-s */
-        CTRL_U = 21,        /* Ctrl-u */
-        ESC = 27,           /* Escape */
-        BACKSPACE =  127,   /* Backspace */
-        /* The following are just soft codes, not really reported by the
-         * terminal directly. */
-        ARROW_LEFT = 1000,
-        ARROW_RIGHT,
-        ARROW_UP,
-        ARROW_DOWN,
-        DEL_KEY,
-        HOME_KEY,
-        END_KEY,
-        PAGE_UP,
-        PAGE_DOWN
 };
 
 /* =========================== Syntax highlights DB =========================
@@ -203,168 +176,7 @@ struct editorSyntax HLDB[] = {
 
 #define HLDB_ENTRIES (sizeof(HLDB)/sizeof(HLDB[0]))
 
-/* ======================= Low level terminal handling ====================== */
-
-class TermConfig {
-public:
-    TermConfig(int ifd, int ofd);
-    ~TermConfig();
-
-    std::pair<int, int> getWindowSize();
-
-private:
-    termios configTerm(termios orig_termios);
-    int m_ifd{};
-    int m_ofd{};
-    termios orig_termios; /* In order to restore at exit.*/
-};
-
 static std::unique_ptr<TermConfig> T_;
-
-
-/* Raw mode: 1960 magic shit. */
-TermConfig::TermConfig(int ifd, int ofd) : m_ifd(ifd), m_ofd(ofd) {
-    if (!isatty(m_ifd)) {
-        errno = ENOTTY;
-        throw std::runtime_error("not a tty");
-    }
-    if (tcgetattr(m_ifd,&orig_termios) == -1) {
-        errno = ENOTTY;
-        throw std::runtime_error("cannot get terminal attributes");
-    }
-
-    auto raw = configTerm(orig_termios);
-
-    /* put terminal in raw mode after flushing */
-    if (tcsetattr(m_ifd,TCSAFLUSH,&raw) < 0) {
-        errno = ENOTTY;
-        throw std::runtime_error("cannot set terminal attributes");
-    }
-}
-
-TermConfig::~TermConfig() {
-    write(m_ifd, "\x1b[2J", 4);
-    write(m_ifd, "\x1b[H", 3);
-    tcsetattr(m_ifd,TCSAFLUSH,&orig_termios);
-}
-
-termios TermConfig::configTerm(termios orig_termios) {
-    auto raw = orig_termios;  /* modify the original mode */
-    /* input modes: no break, no CR to NL, no parity check, no strip char,
-     * no start/stop output control. */
-    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    /* output modes - disable post processing */
-    raw.c_oflag &= ~(OPOST);
-    /* control modes - set 8 bit chars */
-    raw.c_cflag |= (CS8);
-    /* local modes - choing off, canonical off, no extended functions,
-     * no signal chars (^Z,^C) */
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    /* control chars - set return condition: min number of bytes and timer. */
-    raw.c_cc[VMIN] = 0; /* Return each byte, or zero for timeout. */
-    raw.c_cc[VTIME] = 1; /* 100 ms timeout (unit is tens of second). */
-    return raw;
-}
-
-/* Read a key from the terminal put in raw mode, trying to handle
- * escape sequences. */
-int editorReadKey(int fd) {
-    int nread;
-    char c, seq[3];
-    while ((nread = read(fd,&c,1)) == 0);
-    if (nread == -1) exit(1);
-
-    if (c == ESC) {
-        /* If this is just an ESC, we'll timeout here. */
-        if (read(fd,seq,1) == 0) return ESC;
-        if (read(fd,seq+1,1) == 0) return ESC;
-
-        /* ESC [ sequences. */
-        if (seq[0] == '[') {
-            if (seq[1] >= '0' && seq[1] <= '9') {
-                /* Extended escape, read additional byte. */
-                if (read(fd,seq+2,1) == 0) return ESC;
-                if (seq[2] == '~') {
-                    switch(seq[1]) {
-                    case '3': return DEL_KEY;
-                    case '5': return PAGE_UP;
-                    case '6': return PAGE_DOWN;
-                    }
-                }
-            } else {
-                switch(seq[1]) {
-                case 'A': return ARROW_UP;
-                case 'B': return ARROW_DOWN;
-                case 'C': return ARROW_RIGHT;
-                case 'D': return ARROW_LEFT;
-                case 'H': return HOME_KEY;
-                case 'F': return END_KEY;
-                }
-            }
-        }
-        /* ESC O sequences. */
-        else if (seq[0] == 'O') {
-            switch(seq[1]) {
-            case 'H': return HOME_KEY;
-            case 'F': return END_KEY;
-            }
-        }
-    }
-    return c;
-}
-
-// more info at: https://vt100.net/docs/vt100-ug/chapter3.html#ED
-std::pair<int, int> getCursorPosition(int ifd, int ofd) {
-    if (write(ofd, "\x1b[6n", 4) != 4) {
-        throw std::runtime_error("Could not set cursor report");
-    }
-    char buf[32] = {};
-    unsigned int i = 0;
-    // Read the response: ESC [ rows ; cols R
-    while (i < sizeof(buf)-1) {
-        if (read(ifd,buf+i,1) != 1) break;
-        if (buf[i] == 'R') break;
-        ++i;
-    }
-
-    int rows, cols;
-    if (buf[0] != ESC || buf[1] != '[' ||
-        (sscanf(buf+2,"%d;%d",&rows,&cols) != 2)) {
-        throw std::runtime_error("Did not get parsable response");
-    }
-    return { rows, cols };
-}
-
-void setCursorPosition(int /*ifd*/, int ofd, int row, int col) {
-    char seq[32];
-    snprintf(seq, sizeof(seq), "\x1b[%d;%dH", row, col);
-    if (write(ofd,seq,strlen(seq)) == -1) {
-        throw std::runtime_error("Could not set cursor");
-    }
-}
-
-
-// Try to get the number of columns in the current terminal. If the ioctl()
-// call fails the function will try to query the terminal itself.
-// Returns 0 on success, -1 on error.
-std::pair<int, int> TermConfig::getWindowSize() {
-    struct winsize ws;
-    if (ioctl(1, TIOCGWINSZ, &ws) != -1 && ws.ws_col != 0) {
-        return { ws.ws_row, ws.ws_col };
-    }
-    // if that failed, try reading the terminal itself
-
-    // save the cursor position
-    auto orig = getCursorPosition(m_ifd,m_ofd);
-
-    setCursorPosition(m_ifd, m_ofd, 999, 999);
-    auto size = getCursorPosition(m_ifd,m_ofd);
-
-    // restore position
-    setCursorPosition(m_ifd, m_ofd, orig.first, orig.second);
-
-    return size;
-}
 
 /* ====================== Syntax highlight color scheme  ==================== */
 
@@ -385,7 +197,7 @@ int editorRowHasOpenComment(erow const &row) {
 /* Set every byte of row->hl (that corresponds to every character in the line)
  * to the right syntax highlight type (HL_* defines). */
 void editorConfig::editorUpdateSyntax(erow &row) {
-    row.hl = std::vector<unsigned char>(row.render.size(), HL_NORMAL);
+    row.hl = std::vector<int>(row.render.size(), HL_NORMAL);
 
     if (m_syntax == NULL) return; /* No syntax, everything is HL_NORMAL. */
 
@@ -825,7 +637,7 @@ void editorConfig::editorRefreshScreen() {
         if (len > 0) {
             if (len > m_screencols) len = m_screencols;
             char const *c = r->render.data()+m_coloff;
-            unsigned char *hl = r->hl.data()+m_coloff;
+            int const *hl = r->hl.data()+m_coloff;
             int j;
             for (j = 0; j < len; j++) {
                 if (hl[j] == HL_NONPRINT) {
@@ -918,15 +730,12 @@ void editorConfig::editorSetStatusMessage(const char *fmt, ...) {
 
 /* =============================== Find mode ================================ */
 
-#define KILO_QUERY_LEN 256
-
-void editorConfig::editorFind(int fd) {
-    char query[KILO_QUERY_LEN+1] = {0};
-    int qlen = 0;
+void editorConfig::editorFind() {
+    std::string query;
     int last_match = -1; /* Last line where a match was found. -1 for none. */
     int find_next = 0; /* if 1 search next, if -1 search prev. */
     int saved_hl_line = -1;  /* No saved HL */
-    std::vector<unsigned char> saved_hl;
+    std::vector<int> saved_hl;
 
 
     /* Save the cursor position in order to restore it later. */
@@ -934,13 +743,12 @@ void editorConfig::editorFind(int fd) {
     int saved_coloff = m_coloff, saved_rowoff = m_rowoff;
 
     while(1) {
-        editorSetStatusMessage( 
-            "Search: %s (Use ESC/Arrows/Enter)", query);
+        editorSetStatusMessage("Search: %s (Use ESC/Arrows/Enter)", query.c_str());
         editorRefreshScreen();
 
-        int c = editorReadKey(fd);
+        int c = T_->ReadKey();
         if (c == DEL_KEY || c == CTRL_H || c == BACKSPACE) {
-            if (qlen != 0) query[--qlen] = '\0';
+            query.pop_back();
             last_match = -1;
         } else if (c == ESC || c == ENTER) {
             if (c == ESC) {
@@ -958,11 +766,8 @@ void editorConfig::editorFind(int fd) {
         } else if (c == ARROW_LEFT || c == ARROW_UP) {
             find_next = -1;
         } else if (isprint(c)) {
-            if (qlen < KILO_QUERY_LEN) {
-                query[qlen++] = c;
-                query[qlen] = '\0';
-                last_match = -1;
-            }
+            query += c;
+            last_match = -1;
         }
 
         /* Search occurrence. */
@@ -976,7 +781,7 @@ void editorConfig::editorFind(int fd) {
                 current += find_next;
                 if (current == -1) current = m_rows.size()-1;
                 else if (current == (int)m_rows.size()) current = 0;
-                match = strstr(m_rows[current].render.data(),query);
+                match = strstr(m_rows[current].render.data(),query.c_str());
                 if (match) {
                     match_offset = match-m_rows[current].render.data();
                     break;
@@ -996,7 +801,7 @@ void editorConfig::editorFind(int fd) {
                 if (!row->hl.empty()) {
                     saved_hl_line = current;
                     saved_hl = row->hl;
-                    std::fill(row->hl.begin()+match_offset, row->hl.begin()+match_offset+qlen,HL_MATCH);
+                    std::fill(row->hl.begin()+match_offset, row->hl.begin()+match_offset+query.size(),HL_MATCH);
                 }
                 m_cy = 0;
                 m_cx = match_offset;
@@ -1092,12 +897,12 @@ void editorConfig::editorMoveCursor(int key) {
 /* Process events arriving from the standard input, which is, the user
  * is typing stuff on the terminal. */
 #define KILO_QUIT_TIMES 3
-void editorConfig::editorProcessKeypress(int fd) {
+void editorConfig::editorProcessKeypress() {
     /* When the file is modified, requires Ctrl-q to be pressed N times
      * before actually quitting. */
     static int quit_times = KILO_QUIT_TIMES;
 
-    int c = editorReadKey(fd);
+    int c = T_->ReadKey();
     switch(c) {
     case ENTER:         /* Enter */
         editorInsertNewline();
@@ -1120,7 +925,7 @@ void editorConfig::editorProcessKeypress(int fd) {
         editorSave();
         break;
     case CTRL_F:
-        editorFind(fd);
+        editorFind();
         break;
     case BACKSPACE:     /* Backspace */
     case CTRL_H:        /* Ctrl-h */
@@ -1178,13 +983,15 @@ int main(int argc, char **argv) {
     }
 
     T_ = std::make_unique<TermConfig>(STDIN_FILENO, STDOUT_FILENO);
+    editorConfig E_;
+
     E_.editorSelectSyntaxHighlight(argv[1]);
     E_.editorOpen(argv[1]);
     E_.editorSetStatusMessage(
         "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
     while(1) {
         E_.editorRefreshScreen();
-        E_.editorProcessKeypress(STDIN_FILENO);
+        E_.editorProcessKeypress();
     }
     return 0;
 }
