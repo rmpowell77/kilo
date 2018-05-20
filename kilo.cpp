@@ -87,10 +87,6 @@ struct erow {
                            check. */
 };
 
-struct hlcolor {
-    int r,g,b;
-};
-
 struct editorConfig {
     int m_cx{};
     int m_cy{};  /* Cursor x and y position in characters */
@@ -98,7 +94,6 @@ struct editorConfig {
     int m_coloff{};     /* Offset of column displayed. */
     int m_screenrows{}; /* Number of rows that we can show */
     int m_screencols{}; /* Number of cols that we can show */
-    int m_rawmode{};    /* Is terminal raw mode enabled? */
     std::vector<erow> m_rows{};      /* Rows */
     int m_dirty{};      /* File modified but not saved. */
     std::string m_filename{}; /* Currently open filename */
@@ -108,8 +103,6 @@ struct editorConfig {
 
     editorConfig();
 
-    void disableRawMode(int fd);
-    int enableRawMode(int fd);
     void editorSelectSyntaxHighlight(char *filename);
     int editorOpen(std::string const& filename);
     int editorSave();
@@ -212,31 +205,50 @@ struct editorSyntax HLDB[] = {
 
 /* ======================= Low level terminal handling ====================== */
 
-static struct termios orig_termios; /* In order to restore at exit.*/
+class TermConfig {
+public:
+    TermConfig(int fd);
+    ~TermConfig();
 
-void editorConfig::disableRawMode(int fd) {
-    /* Don't even check the return value as it's too late. */
-    if (m_rawmode) {
-        tcsetattr(fd,TCSAFLUSH,&orig_termios);
-        m_rawmode = 0;
+    std::pair<int, int> getWindowSize(int ifd, int ofd);
+
+private:
+    termios configTerm(termios orig_termios);
+    int m_fd{};
+    termios orig_termios; /* In order to restore at exit.*/
+};
+
+static std::unique_ptr<TermConfig> T_;
+
+
+/* Raw mode: 1960 magic shit. */
+TermConfig::TermConfig(int fd) : m_fd(fd) {
+    if (!isatty(m_fd)) {
+        errno = ENOTTY;
+        throw std::runtime_error("not a tty");
+    }
+    if (tcgetattr(m_fd,&orig_termios) == -1) {
+        errno = ENOTTY;
+        throw std::runtime_error("cannot get terminal attributes");
+    }
+
+    auto raw = configTerm(orig_termios);
+
+    /* put terminal in raw mode after flushing */
+    if (tcsetattr(m_fd,TCSAFLUSH,&raw) < 0) {
+        errno = ENOTTY;
+        throw std::runtime_error("cannot set terminal attributes");
     }
 }
 
-/* Called at exit to avoid remaining in raw mode. */
-void editorAtExit() {
-    E_.disableRawMode(STDIN_FILENO);
+TermConfig::~TermConfig() {
+    write(m_fd, "\x1b[2J", 4);
+    write(m_fd, "\x1b[H", 3);
+    tcsetattr(m_fd,TCSAFLUSH,&orig_termios);
 }
 
-/* Raw mode: 1960 magic shit. */
-int editorConfig::enableRawMode(int fd) {
-    struct termios raw;
-
-    if (m_rawmode) return 0; /* Already enabled. */
-    if (!isatty(STDIN_FILENO)) goto fatal;
-    atexit(editorAtExit);
-    if (tcgetattr(fd,&orig_termios) == -1) goto fatal;
-
-    raw = orig_termios;  /* modify the original mode */
+termios TermConfig::configTerm(termios orig_termios) {
+    auto raw = orig_termios;  /* modify the original mode */
     /* input modes: no break, no CR to NL, no parity check, no strip char,
      * no start/stop output control. */
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -250,15 +262,7 @@ int editorConfig::enableRawMode(int fd) {
     /* control chars - set return condition: min number of bytes and timer. */
     raw.c_cc[VMIN] = 0; /* Return each byte, or zero for timeout. */
     raw.c_cc[VTIME] = 1; /* 100 ms timeout (unit is tens of second). */
-
-    /* put terminal in raw mode after flushing */
-    if (tcsetattr(fd,TCSAFLUSH,&raw) < 0) goto fatal;
-    m_rawmode = 1;
-    return 0;
-
-fatal:
-    errno = ENOTTY;
-    return -1;
+    return raw;
 }
 
 /* Read a key from the terminal put in raw mode, trying to handle
@@ -269,109 +273,96 @@ int editorReadKey(int fd) {
     while ((nread = read(fd,&c,1)) == 0);
     if (nread == -1) exit(1);
 
-    while(1) {
-        switch(c) {
-        case ESC:    /* escape sequence */
-            /* If this is just an ESC, we'll timeout here. */
-            if (read(fd,seq,1) == 0) return ESC;
-            if (read(fd,seq+1,1) == 0) return ESC;
+    if (c == ESC) {
+        /* If this is just an ESC, we'll timeout here. */
+        if (read(fd,seq,1) == 0) return ESC;
+        if (read(fd,seq+1,1) == 0) return ESC;
 
-            /* ESC [ sequences. */
-            if (seq[0] == '[') {
-                if (seq[1] >= '0' && seq[1] <= '9') {
-                    /* Extended escape, read additional byte. */
-                    if (read(fd,seq+2,1) == 0) return ESC;
-                    if (seq[2] == '~') {
-                        switch(seq[1]) {
-                        case '3': return DEL_KEY;
-                        case '5': return PAGE_UP;
-                        case '6': return PAGE_DOWN;
-                        }
-                    }
-                } else {
+        /* ESC [ sequences. */
+        if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                /* Extended escape, read additional byte. */
+                if (read(fd,seq+2,1) == 0) return ESC;
+                if (seq[2] == '~') {
                     switch(seq[1]) {
-                    case 'A': return ARROW_UP;
-                    case 'B': return ARROW_DOWN;
-                    case 'C': return ARROW_RIGHT;
-                    case 'D': return ARROW_LEFT;
-                    case 'H': return HOME_KEY;
-                    case 'F': return END_KEY;
+                    case '3': return DEL_KEY;
+                    case '5': return PAGE_UP;
+                    case '6': return PAGE_DOWN;
                     }
                 }
-            }
-
-            /* ESC O sequences. */
-            else if (seq[0] == 'O') {
+            } else {
                 switch(seq[1]) {
+                case 'A': return ARROW_UP;
+                case 'B': return ARROW_DOWN;
+                case 'C': return ARROW_RIGHT;
+                case 'D': return ARROW_LEFT;
                 case 'H': return HOME_KEY;
                 case 'F': return END_KEY;
                 }
             }
-            break;
-        default:
-            return c;
+        }
+        /* ESC O sequences. */
+        else if (seq[0] == 'O') {
+            switch(seq[1]) {
+            case 'H': return HOME_KEY;
+            case 'F': return END_KEY;
+            }
         }
     }
+    return c;
 }
 
-/* Use the ESC [6n escape sequence to query the horizontal cursor position
- * and return it. On error -1 is returned, on success the position of the
- * cursor is stored at *rows and *cols and 0 is returned. */
-int getCursorPosition(int ifd, int ofd, int *rows, int *cols) {
-    char buf[32];
+// more info at: https://vt100.net/docs/vt100-ug/chapter3.html#ED
+std::pair<int, int> getCursorPosition(int ifd, int ofd) {
+    if (write(ofd, "\x1b[6n", 4) != 4) {
+        throw std::runtime_error("Could not set cursor report");
+    }
+    char buf[32] = {};
     unsigned int i = 0;
-
-    /* Report cursor location */
-    if (write(ofd, "\x1b[6n", 4) != 4) return -1;
-
-    /* Read the response: ESC [ rows ; cols R */
+    // Read the response: ESC [ rows ; cols R
     while (i < sizeof(buf)-1) {
         if (read(ifd,buf+i,1) != 1) break;
         if (buf[i] == 'R') break;
-        i++;
+        ++i;
     }
-    buf[i] = '\0';
 
-    /* Parse it. */
-    if (buf[0] != ESC || buf[1] != '[') return -1;
-    if (sscanf(buf+2,"%d;%d",rows,cols) != 2) return -1;
-    return 0;
+    int rows, cols;
+    if (buf[0] != ESC || buf[1] != '[' ||
+        (sscanf(buf+2,"%d;%d",&rows,&cols) != 2)) {
+        throw std::runtime_error("Did not get parsable response");
+    }
+    return { rows, cols };
 }
 
-/* Try to get the number of columns in the current terminal. If the ioctl()
- * call fails the function will try to query the terminal itself.
- * Returns 0 on success, -1 on error. */
-int getWindowSize(int ifd, int ofd, int *rows, int *cols) {
-    struct winsize ws;
-
-    if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        /* ioctl() failed. Try to query the terminal itself. */
-        int orig_row, orig_col, retval;
-
-        /* Get the initial position so we can restore it later. */
-        retval = getCursorPosition(ifd,ofd,&orig_row,&orig_col);
-        if (retval == -1) goto failed;
-
-        /* Go to right/bottom margin and get position. */
-        if (write(ofd,"\x1b[999C\x1b[999B",12) != 12) goto failed;
-        retval = getCursorPosition(ifd,ofd,rows,cols);
-        if (retval == -1) goto failed;
-
-        /* Restore position. */
-        char seq[32];
-        snprintf(seq,32,"\x1b[%d;%dH",orig_row,orig_col);
-        if (write(ofd,seq,strlen(seq)) == -1) {
-            /* Can't recover... */
-        }
-        return 0;
-    } else {
-        *cols = ws.ws_col;
-        *rows = ws.ws_row;
-        return 0;
+void setCursorPosition(int /*ifd*/, int ofd, int row, int col) {
+    char seq[32];
+    snprintf(seq, sizeof(seq), "\x1b[%d;%dH", row, col);
+    if (write(ofd,seq,strlen(seq)) == -1) {
+        throw std::runtime_error("Could not set cursor");
     }
+}
 
-failed:
-    return -1;
+
+// Try to get the number of columns in the current terminal. If the ioctl()
+// call fails the function will try to query the terminal itself.
+// Returns 0 on success, -1 on error.
+std::pair<int, int> TermConfig::getWindowSize(int ifd, int ofd) {
+    struct winsize ws;
+    if (ioctl(1, TIOCGWINSZ, &ws) != -1 && ws.ws_col != 0) {
+        return { ws.ws_row, ws.ws_col };
+    }
+    // if that failed, try reading the terminal itself
+
+    // save the cursor position
+    auto orig = getCursorPosition(ifd,ofd);
+
+    setCursorPosition(ifd, ofd, 999, 999);
+    auto size = getCursorPosition(ifd,ofd);
+
+    // restore position
+    setCursorPosition(ifd, ofd, orig.first, orig.second);
+
+    return size;
 }
 
 /* ====================== Syntax highlight color scheme  ==================== */
@@ -1175,12 +1166,7 @@ int editorFileWasModified(editorConfig& E) {
 
 editorConfig::editorConfig()
 {
-    if (getWindowSize(STDIN_FILENO,STDOUT_FILENO,
-                      &m_screenrows,&m_screencols) == -1)
-    {
-        perror("Unable to query the screen for size (columns / rows)");
-        exit(1);
-    }
+    std::tie(m_screenrows, m_screencols) = T_->getWindowSize(STDIN_FILENO,STDOUT_FILENO);
     m_screenrows -= 2; /* Get room for status bar. */
 }
 
@@ -1190,9 +1176,9 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
+    T_ = std::make_unique<TermConfig>(STDIN_FILENO);
     E_.editorSelectSyntaxHighlight(argv[1]);
     E_.editorOpen(argv[1]);
-    E_.enableRawMode(STDIN_FILENO);
     E_.editorSetStatusMessage(
         "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
     while(1) {
